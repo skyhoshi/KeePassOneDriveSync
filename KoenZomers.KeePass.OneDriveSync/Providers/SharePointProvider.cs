@@ -44,24 +44,9 @@ namespace KoenZomersKeePassOneDriveSync.Providers
                 var site = await graphClient.GetSiteByUrl(new Uri(databaseConfig.RemoteDatabasePath));
                 databaseConfig.OneDriveName = site.DisplayName;
 
-                if (string.IsNullOrEmpty(databaseConfig.RemoteDriveId) && string.IsNullOrEmpty(databaseConfig.RemoteFolderId) && string.IsNullOrEmpty(databaseConfig.RemoteFileName))
+                if (!await EnsureSharePointGraphLocation(databaseConfig, graphClient, site, new System.IO.FileInfo(localKeePassDatabasePath).Name))
                 {
-                    var sharePointDocumentLibraryPickerDialog = new Forms.SharePointDocumentLibraryPickerDialog(graphClient, site.Id)
-                    {
-                        FileName = !string.IsNullOrEmpty(databaseConfig.RemoteFileName) ? databaseConfig.RemoteFileName : new System.IO.FileInfo(localKeePassDatabasePath).Name
-                    };
-                    await sharePointDocumentLibraryPickerDialog.LoadDocumentLibraryItems();
-                    var result = sharePointDocumentLibraryPickerDialog.ShowDialog();
-                    if (result != DialogResult.OK || string.IsNullOrEmpty(sharePointDocumentLibraryPickerDialog.SelectedDriveId) || string.IsNullOrEmpty(sharePointDocumentLibraryPickerDialog.SelectedFolderId))
-                    {
-                        return false;
-                    }
-
-                    databaseConfig.RemoteDriveId = sharePointDocumentLibraryPickerDialog.SelectedDriveId;
-                    databaseConfig.RemoteFolderId = sharePointDocumentLibraryPickerDialog.SelectedFolderId;
-                    databaseConfig.RemoteItemId = sharePointDocumentLibraryPickerDialog.SelectedFileId;
-                    databaseConfig.RemoteFileName = sharePointDocumentLibraryPickerDialog.FileName;
-                    Configuration.Save();
+                    return false;
                 }
 
                 GraphDriveItem sharePointItem = null;
@@ -1165,6 +1150,115 @@ namespace KoenZomersKeePassOneDriveSync.Providers
 
                 return downloadSuccessful ? saveFiledialog.FileName : null;
             }
+        }
+
+        private static async Task<bool> EnsureSharePointGraphLocation(Configuration databaseConfig, SharePointGraphClient graphClient, GraphSite site, string defaultFileName)
+        {
+            if (IsLegacySharePointServerRelativeFolderPath(databaseConfig.RemoteFolderId))
+            {
+                try
+                {
+                    await ResolveLegacySharePointServerRelativeFolderPath(databaseConfig, graphClient, site.Id);
+                }
+                catch (HttpRequestException)
+                {
+                    ClearSharePointGraphLocation(databaseConfig);
+                }
+            }
+
+            if (!string.IsNullOrEmpty(databaseConfig.RemoteDriveId) && !string.IsNullOrEmpty(databaseConfig.RemoteFolderId))
+            {
+                return true;
+            }
+
+            var sharePointDocumentLibraryPickerDialog = new Forms.SharePointDocumentLibraryPickerDialog(graphClient, site.Id)
+            {
+                FileName = !string.IsNullOrEmpty(databaseConfig.RemoteFileName) ? databaseConfig.RemoteFileName : defaultFileName
+            };
+            await sharePointDocumentLibraryPickerDialog.LoadDocumentLibraryItems();
+            var result = sharePointDocumentLibraryPickerDialog.ShowDialog();
+            if (result != DialogResult.OK || string.IsNullOrEmpty(sharePointDocumentLibraryPickerDialog.SelectedDriveId) || string.IsNullOrEmpty(sharePointDocumentLibraryPickerDialog.SelectedFolderId))
+            {
+                return false;
+            }
+
+            databaseConfig.RemoteDriveId = sharePointDocumentLibraryPickerDialog.SelectedDriveId;
+            databaseConfig.RemoteFolderId = sharePointDocumentLibraryPickerDialog.SelectedFolderId;
+            databaseConfig.RemoteItemId = sharePointDocumentLibraryPickerDialog.SelectedFileId;
+            databaseConfig.RemoteFileName = sharePointDocumentLibraryPickerDialog.FileName;
+            Configuration.Save();
+
+            return true;
+        }
+
+        private static async Task ResolveLegacySharePointServerRelativeFolderPath(Configuration databaseConfig, SharePointGraphClient graphClient, string siteId)
+        {
+            var normalizedFolderPath = NormalizeSharePointServerRelativePath(databaseConfig.RemoteFolderId);
+            var drives = await graphClient.GetSiteDrives(siteId);
+            GraphDrive matchingDrive = null;
+            string matchingDrivePath = null;
+
+            foreach (var drive in drives)
+            {
+                Uri driveUri;
+                if (string.IsNullOrEmpty(drive.WebUrl) || !Uri.TryCreate(drive.WebUrl, UriKind.Absolute, out driveUri))
+                {
+                    continue;
+                }
+
+                var drivePath = NormalizeSharePointServerRelativePath(driveUri.AbsolutePath);
+                if (normalizedFolderPath.Equals(drivePath, StringComparison.OrdinalIgnoreCase) || normalizedFolderPath.StartsWith(drivePath + "/", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (matchingDrivePath == null || drivePath.Length > matchingDrivePath.Length)
+                    {
+                        matchingDrive = drive;
+                        matchingDrivePath = drivePath;
+                    }
+                }
+            }
+
+            if (matchingDrive == null)
+            {
+                ClearSharePointGraphLocation(databaseConfig);
+                return;
+            }
+
+            var driveRelativeFolderPath = normalizedFolderPath.Length == matchingDrivePath.Length
+                ? string.Empty
+                : normalizedFolderPath.Substring(matchingDrivePath.Length).Trim('/');
+            var folder = await graphClient.GetDriveItemByPath(matchingDrive.Id, driveRelativeFolderPath);
+
+            databaseConfig.RemoteDriveId = matchingDrive.Id;
+            databaseConfig.RemoteFolderId = folder.Id;
+            databaseConfig.RemoteItemId = null;
+
+            if (!string.IsNullOrEmpty(databaseConfig.RemoteFileName))
+            {
+                var file = await graphClient.GetItemInFolder(databaseConfig.RemoteDriveId, databaseConfig.RemoteFolderId, databaseConfig.RemoteFileName);
+                if (file != null)
+                {
+                    databaseConfig.RemoteItemId = file.Id;
+                }
+            }
+
+            Configuration.Save();
+        }
+
+        private static void ClearSharePointGraphLocation(Configuration databaseConfig)
+        {
+            databaseConfig.RemoteDriveId = null;
+            databaseConfig.RemoteFolderId = null;
+            databaseConfig.RemoteItemId = null;
+        }
+
+        private static bool IsLegacySharePointServerRelativeFolderPath(string remoteFolderId)
+        {
+            return !string.IsNullOrEmpty(remoteFolderId) && remoteFolderId.StartsWith("/", StringComparison.Ordinal);
+        }
+
+        private static string NormalizeSharePointServerRelativePath(string path)
+        {
+            return "/" + Uri.UnescapeDataString(path).Trim('/');
         }
     }
 } 

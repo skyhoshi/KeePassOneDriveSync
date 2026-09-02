@@ -37,6 +37,13 @@ namespace KoenZomersKeePassOneDriveSync.Providers.MicrosoftGraph
             return GetAsync<GraphDriveItem>(string.Format("drives/{0}/root?$select={1}", driveId, DriveItemSelect));
         }
 
+        public Task<GraphDriveItem> GetDriveItemByPath(string driveId, string itemPath)
+        {
+            return string.IsNullOrEmpty(itemPath)
+                ? GetDriveRootItem(driveId)
+                : GetAsync<GraphDriveItem>(string.Format("drives/{0}/root:/{1}?$select={2}", driveId, EscapeGraphPath(itemPath), DriveItemSelect));
+        }
+
         public async Task<GraphDriveItem[]> GetDriveRootChildren(string driveId)
         {
             var response = await GetAsync<GraphCollectionResponse<GraphDriveItem>>(string.Format("drives/{0}/root/children?$select={1}", driveId, DriveItemSelect));

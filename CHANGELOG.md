@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented in this file.
 
+## [3.3.3.0] - September 3, 2026
+
+- Fixed SharePoint Online synchronization for existing configurations that still stored a server-relative document library path by resolving it to Microsoft Graph drive and folder item IDs before syncing
+
 ## [3.3.2.0] - August 12, 2026
 
 - Added support for selecting KeePass databases through OneDrive and SharePoint sharing links as a replacement path for the deprecated Microsoft Graph sharedWithMe API
