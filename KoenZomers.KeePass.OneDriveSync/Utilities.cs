@@ -177,6 +177,7 @@ namespace KoenZomersKeePassOneDriveSync
 
             var httpClientHandler = new HttpClientHandler
             {
+                AllowAutoRedirect = false,
                 Proxy = GetProxySettings(),
                 PreAuthenticate = true,
                 UseDefaultCredentials = false,

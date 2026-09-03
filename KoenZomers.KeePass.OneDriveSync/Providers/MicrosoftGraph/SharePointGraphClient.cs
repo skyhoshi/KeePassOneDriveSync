@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -69,8 +70,14 @@ namespace KoenZomersKeePassOneDriveSync.Providers.MicrosoftGraph
 
         public async Task<bool> DownloadItemAndSaveAs(string driveId, string itemId, string localPath)
         {
-            using (var response = await _httpClient.GetAsync(string.Format("drives/{0}/items/{1}/content", driveId, itemId)))
+            using (var response = await _httpClient.GetAsync(string.Format("drives/{0}/items/{1}/content", driveId, itemId), HttpCompletionOption.ResponseHeadersRead))
             {
+                if (IsRedirect(response.StatusCode) && response.Headers.Location != null)
+                {
+                    await DownloadRedirectedContentAndSaveAs(response.Headers.Location, localPath);
+                    return true;
+                }
+
                 await EnsureSuccess(response);
 
                 using (var responseStream = await response.Content.ReadAsStreamAsync())
@@ -81,6 +88,29 @@ namespace KoenZomersKeePassOneDriveSync.Providers.MicrosoftGraph
             }
 
             return true;
+        }
+
+        private async Task DownloadRedirectedContentAndSaveAs(Uri downloadUri, string localPath)
+        {
+            var absoluteDownloadUri = downloadUri.IsAbsoluteUri ? downloadUri : new Uri(_httpClient.BaseAddress, downloadUri);
+            using (var httpClientHandler = new HttpClientHandler
+            {
+                Proxy = Utilities.GetProxySettings(),
+                PreAuthenticate = true,
+                UseDefaultCredentials = false,
+                Credentials = Utilities.GetProxyCredentials()
+            })
+            using (var downloadClient = new HttpClient(httpClientHandler))
+            using (var response = await downloadClient.GetAsync(absoluteDownloadUri, HttpCompletionOption.ResponseHeadersRead))
+            {
+                await EnsureSuccess(response);
+
+                using (var responseStream = await response.Content.ReadAsStreamAsync())
+                using (var fileStream = File.Create(localPath))
+                {
+                    await responseStream.CopyToAsync(fileStream);
+                }
+            }
         }
 
         public async Task<GraphDriveItem> UploadFileAs(string localPath, string fileName, string driveId, string parentFolderId)
@@ -160,6 +190,12 @@ namespace KoenZomersKeePassOneDriveSync.Providers.MicrosoftGraph
 
             var responseContent = await response.Content.ReadAsStringAsync();
             throw new HttpRequestException(string.Format("Microsoft Graph request failed with HTTP {0} {1}: {2}", (int)response.StatusCode, response.ReasonPhrase, responseContent));
+        }
+
+        private static bool IsRedirect(HttpStatusCode statusCode)
+        {
+            var statusCodeValue = (int)statusCode;
+            return statusCodeValue >= 300 && statusCodeValue <= 399;
         }
 
         private static string EscapeGraphPath(string path)
